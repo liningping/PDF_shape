@@ -1,30 +1,25 @@
-#!/usr/bin/env python3
-#
-# Copyright (c) Facebook, Inc. and its affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-#
+import os
+import numpy as np
 
-
-import argparse
-from sklearn.metrics import f1_score, accuracy_score
 from tqdm import tqdm
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import argparse
+from src.data.helpers import get_data_loaders, get_data_loaders_sample_level
+from src.models import get_model
+from src.utils.logger import create_logger
+
 import torch.optim as optim
 from pytorch_pretrained_bert import BertAdam
 
-from src.data.helpers import get_data_loaders
-from src.models import get_model
-from src.utils.logger import create_logger
+from sklearn.metrics import f1_score, accuracy_score
 from src.utils.utils import *
 
+sample_nums = []
+
 def get_args(parser):
-    parser.add_argument("--batch_sz", type=int, default=128)
+    parser.add_argument("--batch_sz", type=int, default=16)
     parser.add_argument("--bert_model", type=str, default="./bert-base-uncased")#, choices=["bert-base-uncased", "bert-large-uncased"])
     parser.add_argument("--data_path", type=str, default="/path/to/data_dir/")
     parser.add_argument("--drop_img_percent", type=float, default=0.0)
@@ -59,8 +54,7 @@ def get_args(parser):
     parser.add_argument("--noise", type=float, default=0.0)
     parser.add_argument("--baseline", type=str)
     parser.add_argument("--weight_decay", type=float, default=0.0)
-
-
+    parser.add_argument("--warmup_epochs", type=int, default=2)
 
 def get_criterion(args):
     if args.task_type == "multilabel":
@@ -110,11 +104,193 @@ def get_optimizer(model, args):
         optimizer = optim.Adam(optimizer_grouped_parameters, lr=args.lr)
     return optimizer
 
-
 def get_scheduler(optimizer, args):
     return optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, "max", patience=args.lr_patience, verbose=True, factor=args.lr_factor
     )
+
+def warmup_epoch(args, model, dataloader, optimizer):
+    criterion = get_criterion(args)
+    model.train()
+    print("Warm up ... ")
+
+    _loss = 0
+
+    for (txt, segment, mask, img, tgt, idx) in tqdm(dataloader, total=len(dataloader)):
+        optimizer.zero_grad()
+        txt, img = txt.cuda(), img.cuda()
+        mask, segment = mask.cuda(), segment.cuda()
+        tgt = tgt.cuda()
+        out, txt_out, img_out = model(txt, mask, segment, img, 'pdf_train')
+
+        loss = criterion(out, tgt)
+        loss.backward()
+
+        optimizer.step()
+
+        _loss += loss.item()
+
+    return _loss/len(dataloader)
+
+
+def train_epoch(args, model, dataloader, optimizer):
+    criterion = get_criterion(args)
+    model.train()
+    print("Train ... ")
+
+    _loss = 0
+
+    for (txt, segment, mask, img, tgt, idx) in tqdm(dataloader, total=len(dataloader)):
+        optimizer.zero_grad()
+        txt, img = txt.cuda(), img.cuda()
+        mask, segment = mask.cuda(), segment.cuda()
+        tgt = tgt.cuda()
+        out, txt_out, img_out = model(txt, mask, segment, img, 'shape_train')
+
+        loss = criterion(out, tgt)
+        loss.backward()
+
+        optimizer.step()
+
+        _loss += loss.item()
+
+    sample_nums.append(len(dataloader))
+
+    return _loss/len(dataloader)
+
+def execute_modulation_sample_level(args, model, dataloader, epoch):
+    contribution = {}
+    softmax = nn.Softmax(dim=1)
+    con_txt = 0.0
+    con_img = 0.0
+
+    with torch.no_grad():
+        model.eval()
+
+        for (txt, segment, mask, img, tgt, idx) in tqdm(dataloader, total=len(dataloader)):
+            txt, img = txt.cuda(), img.cuda()
+            mask, segment = mask.cuda(), segment.cuda()
+            tgt = tgt.cuda()
+            out, txt_out, img_out = model(txt, mask, segment, img, 'shape_train')
+
+            prediction = softmax(out)
+            prediction_txt = softmax(txt_out)
+            prediction_img = softmax(img_out)
+
+            for i, item in enumerate(tgt):
+                index_all = torch.argmax(prediction[i])
+                index_txt = torch.argmax(prediction_txt[i])
+                index_img = torch.argmax(prediction_img[i])
+                value_all = 0.0
+                value_txt = 0.0
+                value_img = 0.0
+
+                if index_all == tgt[i]:
+                    value_all = 2.0
+                if index_txt == tgt[i]:
+                    value_txt = 1.0
+                if index_img == tgt[i]:
+                    value_img = 1.0
+
+                contrib_txt = (value_all + value_txt - value_img) / 2.0
+                contrib_img = (value_all + value_img - value_txt) / 2.0
+
+                con_txt += contrib_txt
+                con_img += contrib_img
+
+                contribution[int(idx[i])] = (contrib_txt, contrib_img)
+
+    con_txt = con_txt / len(dataloader)
+    con_img = con_img / len(dataloader)
+
+    train_dataloader = None
+    if epoch >= args.warmup_epochs - 1:
+        train_dataloader = get_data_loaders_sample_level(args, contribution)
+
+    return con_txt, con_img, train_dataloader
+
+def model_forward(i_epoch, model, args, criterion, optimizer, batch, mode='eval'):
+    txt, segment, mask, img, tgt, idx = batch
+    freeze_img = i_epoch < args.freeze_img
+    freeze_txt = i_epoch < args.freeze_txt
+
+    if args.model == "bow":
+        txt = txt.cuda()
+        out = model(txt)
+    elif args.model == "img":
+        img = img.cuda()
+        out = model(img)
+    elif args.model == "concatbow":
+        txt, img = txt.cuda(), img.cuda()
+        out = model(txt, img)
+    elif args.model == "bert":
+        txt, mask, segment = txt.cuda(), mask.cuda(), segment.cuda()
+        out = model(txt, mask, segment)
+    elif args.model == "concatbert":
+        txt, img = txt.cuda(), img.cuda()
+        mask, segment = mask.cuda(), segment.cuda()
+        out = model(txt, mask, segment, img)
+
+    elif args.model == "latefusion_pdf":
+        txt, img = txt.cuda(), img.cuda()
+        mask, segment = mask.cuda(), segment.cuda()
+        tgt = tgt.cuda()
+        maeloss = nn.L1Loss(reduction='mean')
+        out, txt_logits, img_logits, txt_tcp_pred, img_tcp_pred = model(txt, mask, segment,img,'pdf_train')
+        label = F.one_hot(tgt, num_classes=args.n_classes)  # [b,c]
+
+        if args.task_type == "multilabel":
+            txt_pred = torch.sigmoid(txt_logits)
+            img_pred = torch.sigmoid(img_logits)
+        else:
+            txt_pred = torch.nn.functional.softmax(txt_logits, dim=1)
+            img_pred = torch.nn.functional.softmax(img_logits, dim=1)
+        txt_tcp, _ = torch.max(txt_pred * label, dim=1,keepdim=True)
+        img_tcp, _ = torch.max(img_pred * label, dim=1,keepdim=True)
+
+    elif args.model == "latefusion_shape":
+        txt, img = txt.cuda(), img.cuda()
+        mask, segment = mask.cuda(), segment.cuda()
+        tgt = tgt.cuda()
+        maeloss = nn.L1Loss(reduction="mean")
+        out, txt_logits, img_logits = model(txt, mask,segment,img,'shape_train')
+        label = F.one_hot(tgt, num_classes=args.n_classes)  # [b,c]
+
+        if args.task_type == "multilabel":
+            txt_pred = torch.sigmoid(txt_logits)
+            img_pred = torch.sigmoid(img_logits)
+        else:
+            txt_pred = torch.nn.functional.softmax(txt_logits, dim=1)
+            img_pred = torch.nn.functional.softmax(img_logits, dim=1)
+        txt_tcp, _ = torch.max(txt_pred * label, dim=1,keepdim=True)
+        img_tcp, _ = torch.max(img_pred * label, dim=1,keepdim=True)
+        # tcp_pred_loss = maeloss(txt_tcp_pred, txt_tcp.detach()) + maeloss(img_tcp_pred, img_tcp.detach())
+
+    else:
+        assert args.model == "mmbt"
+        for param in model.enc.img_encoder.parameters():
+            param.requires_grad = not freeze_img
+        for param in model.enc.encoder.parameters():
+            param.requires_grad = not freeze_txt
+
+        txt, img = txt.cuda(), img.cuda()
+        mask, segment = mask.cuda(), segment.cuda()
+        out = model(txt, mask, segment, img)
+
+    tgt = tgt.cuda()
+
+    txt_clf_loss = nn.CrossEntropyLoss()(txt_logits, tgt)
+    img_clf_loss = nn.CrossEntropyLoss()(img_logits, tgt)
+    clf_loss=txt_clf_loss+img_clf_loss+nn.CrossEntropyLoss()(out,tgt)
+
+    if mode=='train':
+        # loss = torch.mean(clf_loss)+torch.mean(tcp_pred_loss)
+        loss = torch.mean(clf_loss)
+        return loss,out,tgt
+    else:
+        # loss= torch.mean(clf_loss)+torch.mean(tcp_pred_loss)
+        loss= torch.mean(clf_loss)
+        return loss,out,tgt
 
 
 def model_eval(i_epoch, data, model, args, criterion,optimizer, store_preds=False):
@@ -149,88 +325,25 @@ def model_eval(i_epoch, data, model, args, criterion,optimizer, store_preds=Fals
 
     return metrics
 
-def model_forward(i_epoch, model, args, criterion, optimizer, batch, mode='eval'):
-    txt, segment, mask, img, tgt, idx = batch
-    freeze_img = i_epoch < args.freeze_img
-    freeze_txt = i_epoch < args.freeze_txt
-
-    if args.model == "bow":
-        txt = txt.cuda()
-        out = model(txt)
-    elif args.model == "img":
-        img = img.cuda()
-        out = model(img)
-    elif args.model == "concatbow":
-        txt, img = txt.cuda(), img.cuda()
-        out = model(txt, img)
-    elif args.model == "bert":
-        txt, mask, segment = txt.cuda(), mask.cuda(), segment.cuda()
-        out = model(txt, mask, segment)
-    elif args.model == "concatbert":
-        txt, img = txt.cuda(), img.cuda()
-        mask, segment = mask.cuda(), segment.cuda()
-        out = model(txt, mask, segment, img)
-
-    elif args.model == "latefusion_pdf":
-        txt, img = txt.cuda(), img.cuda()
-        mask, segment = mask.cuda(), segment.cuda()
-        tgt = tgt.cuda()
-        maeloss = nn.L1Loss(reduction='mean')
-        out, txt_logits, img_logits, txt_tcp_pred, img_tcp_pred = model(txt, mask,segment,img,'pdf_train')
-        label = F.one_hot(tgt, num_classes=args.n_classes)  # [b,c]
-
-        if args.task_type == "multilabel":
-            txt_pred = torch.sigmoid(txt_logits)
-            img_pred = torch.sigmoid(img_logits)
-        else:
-            txt_pred = torch.nn.functional.softmax(txt_logits, dim=1)
-            img_pred = torch.nn.functional.softmax(img_logits, dim=1)
-        txt_tcp, _ = torch.max(txt_pred * label, dim=1,keepdim=True)
-        img_tcp, _ = torch.max(img_pred * label, dim=1,keepdim=True)
-        tcp_pred_loss = maeloss(txt_tcp_pred, txt_tcp.detach()) + maeloss(img_tcp_pred, img_tcp.detach())
-
-    elif args.model == "latefusion_shape":
-        txt, img = txt.cuda(), img.cuda()
-        mask, segment = mask.cuda(), segment.cuda()
-        out, txt_logits, img_logits = model(txt, mask,segment,img,'shape_train')
-
-    else:
-        assert args.model == "mmbt"
-        for param in model.enc.img_encoder.parameters():
-            param.requires_grad = not freeze_img
-        for param in model.enc.encoder.parameters():
-            param.requires_grad = not freeze_txt
-
-        txt, img = txt.cuda(), img.cuda()
-        mask, segment = mask.cuda(), segment.cuda()
-        out = model(txt, mask, segment, img)
-
-    tgt = tgt.cuda()
-
-    txt_clf_loss = nn.CrossEntropyLoss()(txt_logits, tgt)
-    img_clf_loss = nn.CrossEntropyLoss()(img_logits, tgt)
-    clf_loss=txt_clf_loss+img_clf_loss+nn.CrossEntropyLoss()(out,tgt)
-
-    if mode=='train':
-        # loss = torch.mean(clf_loss)+torch.mean(tcp_pred_loss)
-        loss = torch.mean(clf_loss)
-        return loss,out,tgt
-    else:
-        loss= torch.mean(clf_loss)
-        return loss,out,tgt
-
 def train(args):
+    con_txt = []
+    con_img = []
     set_seed(5)
     args.savedir = os.path.join(args.savedir, args.name)
     os.makedirs(args.savedir, exist_ok=True)
     print(args.df)
-    train_loader, val_loader, test_loaders = get_data_loaders(args)
+
+    train_loader, val_loader, test_loader = get_data_loaders(args)
+    train_val_loader, _, _ = get_data_loaders(args, shuffle=False)
+
     model = get_model(args)
+    
     criterion = get_criterion(args)
     optimizer = get_optimizer(model, args)
     scheduler = get_scheduler(optimizer, args)
     logger = create_logger("%s/logfile.log" % args.savedir, args)
     model.cuda()
+
     torch.save(args, os.path.join(args.savedir, "args.pt"))
     start_epoch, global_step, n_no_improve, best_metric = 0, 0, 0, -np.inf
     if os.path.exists(os.path.join(args.savedir, "checkpoint.pt")):
@@ -244,21 +357,35 @@ def train(args):
     logger.info("Training..")
     logger.info(model)
 
-    for i_epoch in range(start_epoch, args.max_epochs):
+    for epoch in range(start_epoch, args.max_epochs):
         train_losses = []
         model.train()
         optimizer.zero_grad()
 
-        for batch in tqdm(train_loader, total=len(train_loader)):
-            loss, _, _ = model_forward(i_epoch, model, args, criterion,optimizer, batch,mode='train')
-            train_losses.append(loss.item())
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        print("Epoch: {}: ".format(epoch))
+        if epoch < args.warmup_epochs:
+            batch_loss = warmup_epoch(
+                args, model, train_loader, optimizer
+            )
+        else:
+            batch_loss = train_epoch(
+                args, model, train_loader, optimizer
+            )
 
+        if epoch >= args.warmup_epochs - 1:
+            con_t, con_i, train_val_loader = execute_modulation_sample_level(
+                args, model, train_val_loader, epoch
+            )
+        else:
+            con_t, con_i, _ = execute_modulation_sample_level(
+                args, model, train_val_loader, epoch
+            )
+        con_txt.append(con_t)
+        con_img.append(con_i)
 
         model.eval()
-        metrics = model_eval(i_epoch, val_loader, model, args, criterion,optimizer)
+        train_losses.append(batch_loss)
+        metrics = model_eval(epoch, val_loader, model, args, criterion,optimizer)
         logger.info("Train Loss: {:.4f}".format(np.mean(train_losses)))
         log_metrics("Val", metrics, args, logger)
 
@@ -275,7 +402,7 @@ def train(args):
 
         save_checkpoint(
             {
-                "epoch": i_epoch + 1,
+                "epoch": epoch + 1,
                 "state_dict": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
@@ -291,12 +418,12 @@ def train(args):
 
     load_checkpoint(model, os.path.join(args.savedir, "model_best.pt"))
     model.eval()
-    for test_name, test_loader in test_loaders.items():
+    for test_name, test_loader in test_loader.items():
         test_metrics = model_eval(
             np.inf, test_loader, model, args, criterion, optimizer,store_preds=True
         )
         log_metrics(f"Test - {test_name}", test_metrics, args, logger)
-
+        
 
 def cli_main():
     parser = argparse.ArgumentParser(description="Train Models")
@@ -305,10 +432,7 @@ def cli_main():
     assert remaining_args == [], remaining_args
     train(args)
 
-
 if __name__ == "__main__":
     import warnings
-
     warnings.filterwarnings("ignore")
-
     cli_main()

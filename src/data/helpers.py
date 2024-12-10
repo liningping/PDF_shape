@@ -17,7 +17,7 @@ import torchvision.transforms as transforms
 from pytorch_pretrained_bert import BertTokenizer
 from torch.utils.data import DataLoader
 
-from src.data.dataset import JsonlDataset,AddGaussianNoise,AddSaltPepperNoise
+from src.data.dataset import JsonlDataset,AddGaussianNoise,AddSaltPepperNoise,JsonDataset_sample_level
 from src.data.vocab import Vocab
 
 
@@ -84,7 +84,7 @@ def get_glove_words(path):
 
 def get_vocab(args):
     vocab = Vocab()
-    if args.model in ["bert", "mmbt", "concatbert",'latefusion_pdf','img']:
+    if args.model in ["bert", "mmbt", "concatbert",'latefusion_pdf','img', 'latefusion_shape']:
         bert_tokenizer = BertTokenizer.from_pretrained(
             args.bert_model, do_lower_case=True
         )
@@ -108,7 +108,7 @@ def collate_fn(batch, args):
     segment_tensor = torch.zeros(bsz, max_seq_len).long()
 
     img_tensor = None
-    if args.model in ["img", "concatbow", "concatbert", "mmbt",'latefusion_pdf']:
+    if args.model in ["img", "concatbow", "concatbert", "mmbt", 'latefusion_pdf', 'latefusion_shape']:
         img_tensor = torch.stack([row[2] for row in batch])
 
     if args.task_type == "multilabel":
@@ -128,11 +128,11 @@ def collate_fn(batch, args):
     return text_tensor, segment_tensor, mask_tensor, img_tensor, tgt_tensor,idx
 
 
-def get_data_loaders(args):
+def get_data_loaders(args, shuffle=True):
     tokenizer = (
         # BertTokenizer.from_pretrained(args.bert_model, do_lower_case=True).tokenize
         BertTokenizer.from_pretrained(args.bert_model, do_lower_case=True).tokenize
-        if args.model in ["bert", "mmbt", "concatbert",'latefusion_pdf']
+        if args.model in ["bert", "mmbt", "concatbert",'latefusion_pdf', 'latefusion_shape']
         else str.split
     )
 
@@ -167,7 +167,7 @@ def get_data_loaders(args):
     train_loader = DataLoader(
         train,
         batch_size=args.batch_sz,
-        shuffle=True,
+        shuffle=shuffle,
         num_workers=args.n_workers,
         collate_fn=collate,
     )
@@ -254,3 +254,40 @@ def get_data_loaders(args):
         }
 
     return train_loader, val_loader, test
+
+
+def get_data_loaders_sample_level(args, contribution):
+    tokenizer = (
+        BertTokenizer.from_pretrained(args.bert_model, do_lower_case=True).tokenize
+        if args.model in ["bert", "mmbt", "concatbert",'latefusion_pdf', 'latefusion_shape']
+        else str.split
+    )
+    transforms = get_transforms()
+    args.labels, args.label_freqs = get_labels_and_frequencies(
+        os.path.join(args.data_path, args.task, "train.jsonl")
+    )
+    vocab = get_vocab(args)
+    args.vocab = vocab
+    args.vocab_sz = vocab.vocab_sz
+    args.n_classes = len(args.labels)
+
+    train = JsonDataset_sample_level(
+        os.path.join(args.data_path, args.task, "train.jsonl"),
+        tokenizer,
+        transforms,
+        vocab,
+        args,
+        contribution,
+    )
+
+    args.train_data_len = len(train)
+
+    train_loader = DataLoader(
+        train,
+        batch_size = args.batch_sz,
+        shuffle=False,
+        num_workers = args.n_workers,
+        collate_fn=collate_fn,
+    )
+
+    return train_loader
