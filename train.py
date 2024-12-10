@@ -252,19 +252,8 @@ def model_forward(i_epoch, model, args, criterion, optimizer, batch, mode='eval'
         txt, img = txt.cuda(), img.cuda()
         mask, segment = mask.cuda(), segment.cuda()
         tgt = tgt.cuda()
-        maeloss = nn.L1Loss(reduction="mean")
-        out, txt_logits, img_logits = model(txt, mask,segment,img,'shape_train')
+        out, txt_logits, img_logits = model(txt, mask, segment, img,'shape_train')
         label = F.one_hot(tgt, num_classes=args.n_classes)  # [b,c]
-
-        if args.task_type == "multilabel":
-            txt_pred = torch.sigmoid(txt_logits)
-            img_pred = torch.sigmoid(img_logits)
-        else:
-            txt_pred = torch.nn.functional.softmax(txt_logits, dim=1)
-            img_pred = torch.nn.functional.softmax(img_logits, dim=1)
-        txt_tcp, _ = torch.max(txt_pred * label, dim=1,keepdim=True)
-        img_tcp, _ = torch.max(img_pred * label, dim=1,keepdim=True)
-        # tcp_pred_loss = maeloss(txt_tcp_pred, txt_tcp.detach()) + maeloss(img_tcp_pred, img_tcp.detach())
 
     else:
         assert args.model == "mmbt"
@@ -297,7 +286,7 @@ def model_eval(i_epoch, data, model, args, criterion,optimizer, store_preds=Fals
     with torch.no_grad():
         losses, preds, tgts = [], [], []
         for batch in data:
-            loss, out, tgt = model_forward(i_epoch, model, args, criterion,optimizer, batch,mode='eval')
+            loss, out, tgt = model_forward(i_epoch, model, args, criterion, optimizer, batch, mode='eval')
             losses.append(loss.item())
 
             if args.task_type == "multilabel":
