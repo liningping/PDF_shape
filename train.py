@@ -167,7 +167,7 @@ def execute_modulation_sample_level(args, model, dataloader, epoch):
     with torch.no_grad():
         model.eval()
 
-        for (txt, segment, mask, img, tgt, idx) in tqdm(dataloader, total=len(dataloader)):
+        for (txt, segment, mask, img, tgt, idx) in dataloader:
             txt, img = txt.cuda(), img.cuda()
             mask, segment = mask.cuda(), segment.cuda()
             tgt = tgt.cuda()
@@ -333,7 +333,7 @@ def train(args):
     os.makedirs(args.savedir, exist_ok=True)
     print(args.df)
 
-    train_loader, val_loader, test_loader = get_data_loaders(args)
+    train_loader, val_loader, test_loader = get_data_loaders(args, shuffle=True)
     train_val_loader, _, _ = get_data_loaders(args, shuffle=False)
 
     model = get_model(args)
@@ -373,7 +373,7 @@ def train(args):
             )
 
         if epoch >= args.warmup_epochs - 1:
-            con_t, con_i, train_val_loader = execute_modulation_sample_level(
+            con_t, con_i, train_loader = execute_modulation_sample_level(
                 args, model, train_val_loader, epoch
             )
         else:
@@ -382,10 +382,9 @@ def train(args):
             )
         con_txt.append(con_t)
         con_img.append(con_i)
-
-        model.eval()
         train_losses.append(batch_loss)
-        metrics = model_eval(epoch, val_loader, model, args, criterion,optimizer)
+        model.eval()
+        metrics = model_eval(epoch, val_loader, model, args, criterion, optimizer)
         logger.info("Train Loss: {:.4f}".format(np.mean(train_losses)))
         log_metrics("Val", metrics, args, logger)
 
