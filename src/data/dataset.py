@@ -185,6 +185,8 @@ class JsonDataset_sample_level(Dataset):
                     row["img"] = None
 
         self.max_seq_len = args.max_seq_len
+        self.transforms = transforms
+        
         if args.model == "mmbt":
             self.max_seq_len -= args.num_image_embeds
 
@@ -211,8 +213,6 @@ class JsonDataset_sample_level(Dataset):
                     self.data.append(self.data[i])
 
         print('data resample finished')
-
-        self.transforms = transforms
 
     def __len__(self):
         return len(self.data)

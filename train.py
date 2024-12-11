@@ -16,19 +16,21 @@ from pytorch_pretrained_bert import BertAdam
 from sklearn.metrics import f1_score, accuracy_score
 from src.utils.utils import *
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,7"
+
 sample_nums = []
 
 def get_args(parser):
     parser.add_argument("--batch_sz", type=int, default=16)
-    parser.add_argument("--bert_model", type=str, default="./bert-base-uncased")#, choices=["bert-base-uncased", "bert-large-uncased"])
-    parser.add_argument("--data_path", type=str, default="/path/to/data_dir/")
+    parser.add_argument("--bert_model", type=str, default="/home/zrb/study/PDF/bert-base-uncased")#, choices=["bert-base-uncased", "bert-large-uncased"])
+    parser.add_argument("--data_path", type=str, default="/home/zrb/study/PDF/datasets")
     parser.add_argument("--drop_img_percent", type=float, default=0.0)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--embed_sz", type=int, default=300)
-    parser.add_argument("--freeze_img", type=int, default=0)
-    parser.add_argument("--freeze_txt", type=int, default=0)
+    parser.add_argument("--freeze_img", type=int, default=3)
+    parser.add_argument("--freeze_txt", type=int, default=5)
     parser.add_argument("--glove_path", type=str, default="./datasets/glove_embeds/glove.840B.300d.txt")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=24)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--hidden", nargs="*", type=int, default=[])
     parser.add_argument("--hidden_sz", type=int, default=768)
     parser.add_argument("--img_embed_pool_type", type=str, default="avg", choices=["max", "avg"])
@@ -39,13 +41,13 @@ def get_args(parser):
     parser.add_argument("--lr_patience", type=int, default=2)
     parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--max_seq_len", type=int, default=512)
-    parser.add_argument("--model", type=str, default="bow", choices=["bow", "img", "bert", "concatbow", "concatbert", "mmbt","latefusion_pdf", "latefusion_shape"])
+    parser.add_argument("--model", type=str, default="latefusion_shape", choices=["bow", "img", "bert", "concatbow", "concatbert", "mmbt","latefusion_pdf", "latefusion_shape"])
     parser.add_argument("--n_workers", type=int, default=12)
-    parser.add_argument("--name", type=str, default="nameless")
-    parser.add_argument("--num_image_embeds", type=int, default=1)
+    parser.add_argument("--name", type=str, default="test")
+    parser.add_argument("--num_image_embeds", type=int, default=3)
     parser.add_argument("--patience", type=int, default=10)
-    parser.add_argument("--savedir", type=str, default="/path/to/save_dir/")
-    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--savedir", type=str, default="saved/")
+    parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--task", type=str, default="food101", choices=["food101","MVSA_Single"])
     parser.add_argument("--task_type", type=str, default="classification", choices=["multilabel", "classification"])
     parser.add_argument("--warmup", type=float, default=0.1)
@@ -53,8 +55,8 @@ def get_args(parser):
     parser.add_argument("--df", type=bool, default=True)
     parser.add_argument("--noise", type=float, default=0.0)
     parser.add_argument("--baseline", type=str)
-    parser.add_argument("--weight_decay", type=float, default=0.0)
-    parser.add_argument("--warmup_epochs", type=int, default=2)
+    parser.add_argument("--weight_decay", type=float, default=1)
+    parser.add_argument("--warmup_epochs", type=int, default=0)
 
 def get_criterion(args):
     if args.task_type == "multilabel":
@@ -139,7 +141,8 @@ def train_epoch(args, model, dataloader, optimizer):
     print("Train ... ")
 
     _loss = 0
-
+    first_batch = next(iter(dataloader))
+    print(first_batch[0])
     for (txt, segment, mask, img, tgt, idx) in tqdm(dataloader, total=len(dataloader)):
         optimizer.zero_grad()
         txt, img = txt.cuda(), img.cuda()
@@ -206,6 +209,8 @@ def execute_modulation_sample_level(args, model, dataloader, epoch):
     train_dataloader = None
     if epoch >= args.warmup_epochs - 1:
         train_dataloader = get_data_loaders_sample_level(args, contribution)
+    
+    first_batch = next(iter(train_dataloader))
 
     return con_txt, con_img, train_dataloader
 
@@ -320,10 +325,11 @@ def train(args):
     set_seed(5)
     args.savedir = os.path.join(args.savedir, args.name)
     os.makedirs(args.savedir, exist_ok=True)
-    print(args.df)
-
+    # print(args.df)
+    print(args)
     train_loader, val_loader, test_loader = get_data_loaders(args, shuffle=True)
     train_val_loader, _, _ = get_data_loaders(args, shuffle=False)
+    test = next(iter(train_val_loader))
 
     model = get_model(args)
     
@@ -352,6 +358,8 @@ def train(args):
         optimizer.zero_grad()
 
         print("Epoch: {}: ".format(epoch))
+        # next(iter(train_loader))
+        # print(next(iter(train_loader)))
         if epoch < args.warmup_epochs:
             batch_loss = warmup_epoch(
                 args, model, train_loader, optimizer
@@ -360,6 +368,9 @@ def train(args):
             batch_loss = train_epoch(
                 args, model, train_loader, optimizer
             )
+
+        model.eval()
+        metrics = model_eval(epoch, val_loader, model, args, criterion, optimizer)
 
         if epoch >= args.warmup_epochs - 1:
             con_t, con_i, train_loader = execute_modulation_sample_level(
@@ -372,8 +383,8 @@ def train(args):
         con_txt.append(con_t)
         con_img.append(con_i)
         train_losses.append(batch_loss)
-        model.eval()
-        metrics = model_eval(epoch, val_loader, model, args, criterion, optimizer)
+        # model.eval()
+        # metrics = model_eval(epoch, val_loader, model, args, criterion, optimizer)
         logger.info("Train Loss: {:.4f}".format(np.mean(train_losses)))
         log_metrics("Val", metrics, args, logger)
 

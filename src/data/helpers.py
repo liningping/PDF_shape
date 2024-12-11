@@ -270,6 +270,7 @@ def get_data_loaders_sample_level(args, contribution):
     args.vocab = vocab
     args.vocab_sz = vocab.vocab_sz
     args.n_classes = len(args.labels)
+    collate = functools.partial(collate_fn, args=args)
 
     train = JsonDataset_sample_level(
         os.path.join(args.data_path, args.task, "train.jsonl"),
@@ -287,7 +288,7 @@ def get_data_loaders_sample_level(args, contribution):
         batch_size = args.batch_sz,
         shuffle=False,
         num_workers = args.n_workers,
-        collate_fn=collate_fn,
+        collate_fn=collate,
     )
 
     return train_loader
