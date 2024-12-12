@@ -3,4 +3,4 @@ bert-base-uncased/
 jina-clip-v2/
 images/
 texts/
-.pyc
+__pycache_/
