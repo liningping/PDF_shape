@@ -14,6 +14,7 @@ from .concat_bow import  MultimodalConcatBowClf
 from .image import ImageClf
 from .mmbt import MultimodalBertClf
 from .latefusion_pdf import MultimodalLateFusionClf_pdf
+from .latefusion_shape import MultimodalLateFusionClf_shape
 MODELS = {
     "bert": BertClf,
     "bow": GloveBowClf,
@@ -21,7 +22,8 @@ MODELS = {
     "concatbert": MultimodalConcatBertClf,
     "img": ImageClf,
     "mmbt": MultimodalBertClf,
-    'latefusion_pdf':MultimodalLateFusionClf_pdf
+    'latefusion_pdf':MultimodalLateFusionClf_pdf,
+    'latefusion_shape':MultimodalLateFusionClf_shape
 }
 
 

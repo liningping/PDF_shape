@@ -34,7 +34,7 @@ class MultimodalLateFusionClf_pdf(nn.Module):
             nn.Sigmoid()
         )
         
-    def forward(self, txt, mask, segment, img,choice):
+    def forward(self, txt, mask, segment, img, choice):
         txt_out,txt_f = self.txtclf(txt, mask, segment)
         img_out,img_f = self.imgclf(img)
         if self.args.df:
