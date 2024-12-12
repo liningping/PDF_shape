@@ -10,15 +10,15 @@
 import json
 import numpy as np
 import os
+import random
 from PIL import Image
 from PIL import ImageFile
-ImageFile.LOAD_TRUNCATED_IMAGES = True
 import torch
 from torch.utils.data import Dataset
-
 from src.utils.utils import truncate_seq_pair, numpy_seed
 
-import random
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 class JsonlDataset(Dataset):
     def __init__(self, data_path, tokenizer, transforms, vocab, args):
         self.data = [json.loads(l) for l in open(data_path)]
